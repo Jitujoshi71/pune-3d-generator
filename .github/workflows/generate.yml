@@ -1,0 +1,295 @@
+name: Generate Pune 3D Prototype
+
+on: workflow_dispatch
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    name: Generate 1km Pune 3D Chunk
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 120
+
+    steps:
+
+      # ======================================================
+      # CHECKOUT
+      # ======================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      # ======================================================
+      # PYTHON
+      # ======================================================
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      # ======================================================
+      # SYSTEM INFO
+      # ======================================================
+
+      - name: System information
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "PUNE 3D GENERATOR"
+          echo "========================================"
+
+          echo
+          echo "CPU:"
+          nproc
+
+          echo
+          echo "RAM:"
+          free -h
+
+          echo
+          echo "DISK:"
+          df -h
+
+      # ======================================================
+      # DOWNLOAD PROCESSED CHUNKS
+      # ======================================================
+
+      - name: Download processed chunks
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "DOWNLOADING PROCESSED PUNE DATA"
+          echo "========================================"
+
+          mkdir -p /tmp/processed
+
+          gh run download \
+            --repo Jitujoshi71/pune-processor-py \
+            --name pune-1km-chunks \
+            --dir /tmp/processed
+
+          echo
+          echo "Downloaded:"
+          find /tmp/processed \
+            -maxdepth 3 \
+            -type f \
+            -printf '%p  %s bytes\n'
+
+      # ======================================================
+      # EXTRACT PROCESSED DATA
+      # ======================================================
+
+      - name: Extract processed chunks
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p data
+
+          ARCHIVE="/tmp/processed/pune-1km-chunks.tar.gz"
+
+          if [ ! -f "$ARCHIVE" ]; then
+            echo "ERROR: Processed archive not found."
+            exit 1
+          fi
+
+          tar \
+            -xzf \
+            "$ARCHIVE" \
+            -C .
+
+          echo
+          echo "Processed chunks:"
+          find data/chunks \
+            -maxdepth 2 \
+            -type f \
+            | head -100
+
+      # ======================================================
+      # DOWNLOAD RAW RELEASE
+      # ======================================================
+
+      - name: Download raw release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+
+          RAW_REPO="Jitujoshi71/pune_raw_py"
+          RAW_TAG="pune-raw-v1"
+
+          mkdir -p /tmp/raw
+
+          echo "========================================"
+          echo "DOWNLOADING RAW DATA"
+          echo "========================================"
+
+          gh release view \
+            "$RAW_TAG" \
+            --repo "$RAW_REPO"
+
+          gh release download \
+            "$RAW_TAG" \
+            --repo "$RAW_REPO" \
+            --dir /tmp/raw \
+            --clobber
+
+          echo
+          echo "Raw assets:"
+          ls -lh /tmp/raw
+
+      # ======================================================
+      # RESTORE DEM
+      # ======================================================
+
+      - name: Restore DEM
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p data/raw/dem
+
+          for TILE in \
+            N18E073 \
+            N18E074 \
+            N19E073 \
+            N19E074
+          do
+
+            SOURCE="/tmp/raw/${TILE}.hgt.gz"
+
+            if [ -f "$SOURCE" ]; then
+
+              cp \
+                "$SOURCE" \
+                "data/raw/dem/${TILE}.hgt.gz"
+
+              echo "Restored $TILE"
+
+            else
+
+              echo "WARNING: Missing $TILE"
+
+            fi
+
+          done
+
+          echo
+          ls -lh data/raw/dem
+
+      # ======================================================
+      # INSTALL DEPENDENCIES
+      # ======================================================
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -e
+
+          python -m pip install \
+            --upgrade pip
+
+          python -m pip install \
+            -r requirements.txt
+
+      # ======================================================
+      # VALIDATE
+      # ======================================================
+
+      - name: Validate generator
+        shell: bash
+        run: |
+          set -e
+
+          python -m py_compile \
+            generator.py
+
+          python - <<'PY'
+          import numpy
+          import shapely
+          import trimesh
+
+          print("NumPy:", numpy.__version__)
+          print("Shapely:", shapely.__version__)
+          print("Trimesh:", trimesh.__version__)
+          print("Imports OK.")
+          PY
+
+      # ======================================================
+      # GENERATE
+      # ======================================================
+
+      - name: Generate 3D chunk
+        shell: bash
+        run: |
+          set -e
+
+          python generator.py
+
+      # ======================================================
+      # SHOW OUTPUT
+      # ======================================================
+
+      - name: Show generated files
+        if: always()
+        shell: bash
+        run: |
+          echo
+          echo "========================================"
+          echo "GENERATED OUTPUT"
+          echo "========================================"
+
+          if [ -d output ]; then
+
+            find output \
+              -type f \
+              -printf '%p  %s bytes\n'
+
+            echo
+            echo "Total:"
+            du -sh output
+
+          else
+
+            echo "No output directory."
+
+          fi
+
+      # ======================================================
+      # UPLOAD GLB
+      # ======================================================
+
+      - name: Upload 3D prototype
+        if: success()
+        uses: actions/upload-artifact@v5
+        with:
+          name: pune-3d-prototype
+          path: output/
+          retention-days: 30
+
+      # ======================================================
+      # FINAL REPORT
+      # ======================================================
+
+      - name: Final report
+        if: always()
+        shell: bash
+        run: |
+          echo
+          echo "========================================"
+          echo "FINAL REPORT"
+          echo "========================================"
+
+          df -h
+
+          echo
+          echo "Generated data:"
+          du -sh output 2>/dev/null || true
